@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Resource Card Auto-Fill</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            padding: 16px;
+            margin: 0;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+        h2 {
+            margin: 0 0 12px 0;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        .status-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .status-item {
+            padding: 4px 0;
+            border-bottom: 1px solid #f0f0f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .status-item:last-child {
+            border-bottom: none;
+        }
+        .status-label {
+            font-weight: 500;
+        }
+        .status-value {
+            color: #666;
+            font-size: 11px;
+        }
+        .status-success {
+            color: #00aa00;
+        }
+        .status-error {
+            color: #ff4444;
+        }
+        .status-pending {
+            color: #ff8800;
+        }
+        .controls {
+            margin-bottom: 16px;
+            display: flex;
+            gap: 8px;
+        }
+        button {
+            padding: 6px 12px;
+            border: 1px solid #ccc;
+            background: #fff;
+            border-radius: 4px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #f5f5f5;
+        }
+    </style>
+    <script>
+        function addStatus(label, value, type = 'pending') {
+            const list = document.getElementById('statusList');
+            const item = document.createElement('li');
+            item.className = 'status-item';
+            
+            const labelSpan = document.createElement('span');
+            labelSpan.className = 'status-label';
+            labelSpan.textContent = label;
+            
+            const valueSpan = document.createElement('span');
+            valueSpan.className = `status-value status-${type}`;
+            valueSpan.textContent = value;
+            
+            item.appendChild(labelSpan);
+            item.appendChild(valueSpan);
+            list.appendChild(item);
+        }
+
+        function updateStatus(label, value, type = 'success') {
+            const items = document.querySelectorAll('.status-item');
+            for (const item of items) {
+                if (item.querySelector('.status-label').textContent === label) {
+                    const valueSpan = item.querySelector('.status-value');
+                    valueSpan.textContent = value;
+                    valueSpan.className = `status-value status-${type}`;
+                    break;
+                }
+            }
+        }
+
+        function clearStatus() {
+            const list = document.getElementById('statusList');
+            list.innerHTML = '';
+        }
+
+        function runPlugin() {
+            parent.postMessage({ pluginMessage: { type: 'run' } }, '*');
+        }
+
+        window.onmessage = async (event) => {
+            const { type, ...data } = event.data.pluginMessage;
+            
+            if (type === 'status') {
+                if (data.action === 'add') {
+                    addStatus(data.label, data.value, data.statusType || 'pending');
+                } else if (data.action === 'update') {
+                    updateStatus(data.label, data.value, data.statusType || 'success');
+                }
+            }
+        };
+    </script>
+</head>
+<body>
+    <h2>Resource Card Auto-Fill</h2>
+    <div class="controls">
+        <button onclick="runPlugin()">Run Plugin</button>
+        <button onclick="clearStatus()">Clear Status</button>
+    </div>
+    <ul id="statusList" class="status-list">
+        <!-- Status items will be added dynamically -->
+    </ul>
+</body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "name": "@resource-card/server",
+  "version": "1.0.0",
+  "description": "Server for fetching website metadata and images",
+  "main": "index.js",
+  "scripts": {
+    "dev": "nodemon index.js",
+    "start": "node index.js",
+    "clean": "rm -rf node_modules"
+  },
+  "keywords": [],
+  "author": "",
+  "type": "module",
+  "license": "ISC",
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "puppeteer": "^22.6.5",
+    "puppeteer-full-page-screenshot": "^1.2.2",
+    "sharp": "^0.33.3"
+  }
+}
