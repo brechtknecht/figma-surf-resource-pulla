@@ -43,6 +43,45 @@ const sendStatus = (label: string, value: string, statusType: 'pending' | 'succe
   figma.ui.postMessage({ type: 'status', action, label, value, statusType });
 };
 
+const fillEmptyFrameWithScreenshot = async (node: SceneNode, url: string, prefix: string) => {
+  try {
+    sendStatus(`${prefix}Screenshot`, 'Requesting screenshot...', 'pending');
+    
+    // Use the existing /capture endpoint for simple screenshot
+    const response = await fetch(`http://localhost:3000/capture`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        url,
+        width: 'width' in node ? node.width : 1200,
+        height: 'height' in node ? node.height : 800
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Screenshot failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (data.success && data.imageUrl) {
+      // Apply screenshot as fill to the frame
+      const imageBytes = base64ToUint8Array(data.imageUrl.split('base64,')[1]);
+      const imageHash = figma.createImage(imageBytes).hash;
+      
+      if ('fills' in node) {
+        node.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash }];
+        sendStatus(`${prefix}Screenshot`, 'Applied to frame', 'success', 'update');
+      } else {
+        sendStatus(`${prefix}Screenshot`, 'Frame cannot have fills', 'error', 'update');
+      }
+    } else {
+      throw new Error('Screenshot response invalid');
+    }
+  } catch (error) {
+    sendStatus(`${prefix}Screenshot`, `Error: ${error instanceof Error ? error.message : String(error)}`, 'error', 'update');
+  }
+};
+
 const processNode = async (node: SceneNode, index: number, total: number) => {
   const prefix = total > 1 ? `[${index + 1}/${total}] ` : '';
   
