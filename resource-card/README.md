@@ -52,7 +52,8 @@ Your Figma components should have layers named exactly:
 - `data:title` - Text layer for page title
 - `data:description` - Text layer for page description  
 - `data:sourceURL` - Text layer for hostname
-- `data:cover` - Image layer for og:image or screenshot (with FILL scale mode)
+- `data:cover` - Image layer for og:image or screenshot fallback (with FILL scale mode)
+- `data:screenshot` - Image layer that always gets a screenshot (with FILL scale mode)
 - `data:favicon` - Image layer for site favicon
 
 ## Commands

@@ -56,7 +56,7 @@ app.post("/capture", async (req, res) => {
 });
 
 app.post("/metadata", async (req, res) => {
-  const { url, width, height } = req.body;
+  const { url, width, height, needsScreenshot } = req.body;
 
   try {
     const browser = await puppeteer.launch();
@@ -157,6 +157,7 @@ app.post("/metadata", async (req, res) => {
     // Fetch images server-side to avoid CORS
     let coverImageBase64 = null;
     let faviconImageBase64 = null;
+    let screenshotImageBase64 = null;
 
     // PRIORITY: Try to fetch og:image first with proper headers
     if (metadata.ogImage) {
@@ -289,13 +290,43 @@ app.post("/metadata", async (req, res) => {
       console.log('All favicon sources failed');
     }
 
+    // Handle screenshot if specifically requested (for data:screenshot layer)
+    if (needsScreenshot) {
+      console.log('=== GENERATING SCREENSHOT FOR data:screenshot LAYER ===');
+      
+      // Use standard desktop viewport for screenshots
+      const screenshotWidth = 1920;
+      const screenshotHeight = 1080;
+      
+      console.log('Setting viewport for screenshot:', screenshotWidth, 'x', screenshotHeight);
+      
+      await page.setViewport({
+        width: screenshotWidth,
+        height: screenshotHeight,
+        deviceScaleFactor: 1,
+      });
+
+      // Wait for page to adjust to new viewport
+      await new Promise(resolve => global.setTimeout(resolve, 2000));
+
+      const buffer = await page.screenshot({ fullPage: false, type: "png" });
+      
+      // Only optimize quality, keep full screenshot
+      const optimizedBuffer = await sharp(buffer)
+        .jpeg({ quality: 85 })
+        .toBuffer();
+      screenshotImageBase64 = `data:image/jpeg;base64,${optimizedBuffer.toString('base64')}`;
+      console.log('=== SCREENSHOT SUCCESS FOR data:screenshot ===');
+    }
+
     await browser.close();
 
     res.json({
       success: true,
       metadata,
       coverImage: coverImageBase64,
-      faviconImage: faviconImageBase64
+      faviconImage: faviconImageBase64,
+      screenshotImage: screenshotImageBase64
     });
   } catch (error) {
     console.error("Metadata error:", error);

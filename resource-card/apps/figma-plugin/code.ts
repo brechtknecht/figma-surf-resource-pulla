@@ -54,8 +54,19 @@ const processNode = async (node: SceneNode, index: number, total: number) => {
   const url = node.name;
   sendStatus(`${prefix}URL Found`, url, 'success');
 
+  // Check if this is an empty frame (special case for direct screenshot)
+  const isEmptyFrame = 'children' in node && node.children.length === 0;
+  if (isEmptyFrame) {
+    sendStatus(`${prefix}Empty Frame`, 'Detected - will fill with screenshot', 'success');
+    await fillEmptyFrameWithScreenshot(node, url, prefix);
+    return;
+  }
+
   try {
     sendStatus(`${prefix}Fetching Metadata`, 'Connecting to server...', 'pending');
+    
+    // Check if screenshot layer exists to request screenshot
+    const needsScreenshot = !!findLayerByName(node, 'data:screenshot');
     
     const metadataResponse = await fetch(`http://localhost:3000/metadata`, {
       method: 'POST',
@@ -63,7 +74,8 @@ const processNode = async (node: SceneNode, index: number, total: number) => {
       body: JSON.stringify({ 
         url,
         width: 'width' in node ? node.width : 800,
-        height: 'height' in node ? node.height : 600
+        height: 'height' in node ? node.height : 600,
+        needsScreenshot
       }),
     });
 
@@ -109,8 +121,11 @@ const processNode = async (node: SceneNode, index: number, total: number) => {
       sendStatus(`${prefix}Source URL Layer`, !sourceLayer ? 'data:sourceURL not found' : !metadata.hostname ? 'No data' : 'Wrong type', 'error');
     }
 
-    // Handle images
+    // Handle images - check for both cover and screenshot layers
     const coverLayer = findLayerByName(node, 'data:cover');
+    const screenshotLayer = findLayerByName(node, 'data:screenshot');
+    
+    // Handle cover layer (og:image or fallback screenshot)
     if (coverLayer && ('fills' in coverLayer) && metadataData.coverImage) {
       try {
         const coverBytes = base64ToUint8Array(metadataData.coverImage.split('base64,')[1]);
@@ -120,8 +135,22 @@ const processNode = async (node: SceneNode, index: number, total: number) => {
       } catch (error) {
         sendStatus(`${prefix}Cover Layer`, `Error: ${error}`, 'error');
       }
-    } else {
-      sendStatus(`${prefix}Cover Layer`, !coverLayer ? 'data:cover not found' : !('fills' in coverLayer) ? 'No fills' : 'No image data', 'error');
+    } else if (coverLayer) {
+      sendStatus(`${prefix}Cover Layer`, !('fills' in coverLayer) ? 'No fills' : 'No image data', 'error');
+    }
+    
+    // Handle screenshot layer (always gets screenshot)
+    if (screenshotLayer && ('fills' in screenshotLayer) && metadataData.screenshotImage) {
+      try {
+        const screenshotBytes = base64ToUint8Array(metadataData.screenshotImage.split('base64,')[1]);
+        const screenshotHash = figma.createImage(screenshotBytes).hash;
+        screenshotLayer.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash: screenshotHash }];
+        sendStatus(`${prefix}Screenshot Layer`, 'Screenshot applied', 'success');
+      } catch (error) {
+        sendStatus(`${prefix}Screenshot Layer`, `Error: ${error}`, 'error');
+      }
+    } else if (screenshotLayer) {
+      sendStatus(`${prefix}Screenshot Layer`, !('fills' in screenshotLayer) ? 'No fills' : 'No screenshot data', 'error');
     }
 
     const faviconLayer = findLayerByName(node, 'data:favicon');
