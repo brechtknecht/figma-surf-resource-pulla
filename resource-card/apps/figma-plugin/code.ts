@@ -1,5 +1,8 @@
 figma.showUI(__html__);
 
+// Global variable to store active session IDs
+let activeInteractiveSessions: string[] = [];
+
 const findLayerByName = (node: SceneNode, name: string): SceneNode | null => {
   if (node.name === name) return node;
   if ('children' in node) {
@@ -43,40 +46,225 @@ const sendStatus = (label: string, value: string, statusType: 'pending' | 'succe
   figma.ui.postMessage({ type: 'status', action, label, value, statusType });
 };
 
-const fillEmptyFrameWithScreenshot = async (node: SceneNode, url: string, prefix: string) => {
+const parseUrl = (rawUrl: string): { url: string; openBrowser: boolean } => {
+  if (rawUrl.includes('::openBrowser')) {
+    return {
+      url: rawUrl.replace('::openBrowser', ''),
+      openBrowser: true
+    };
+  }
+  return {
+    url: rawUrl,
+    openBrowser: false
+  };
+};
+
+const processMetadataResults = async (node: SceneNode, metadataData: any, prefix: string) => {
+  sendStatus(`${prefix}Fetching Metadata`, 'Complete', 'success', 'update');
+  const metadata = metadataData.metadata;
+
+  // Update text layers
+  const titleLayer = findLayerByName(node, 'data:title');
+  if (titleLayer && titleLayer.type === 'TEXT' && metadata.title) {
+    await figma.loadFontAsync(titleLayer.fontName as FontName);
+    titleLayer.characters = metadata.title;
+    sendStatus(`${prefix}Title Layer`, `Set: ${metadata.title.substring(0, 20)}...`, 'success');
+  } else {
+    sendStatus(`${prefix}Title Layer`, !titleLayer ? 'data:title not found' : !metadata.title ? 'No data' : 'Wrong type', 'error');
+  }
+
+  const descLayer = findLayerByName(node, 'data:description');
+  if (descLayer && descLayer.type === 'TEXT' && metadata.description) {
+    await figma.loadFontAsync(descLayer.fontName as FontName);
+    descLayer.characters = metadata.description;
+    sendStatus(`${prefix}Description Layer`, `Set: ${metadata.description.substring(0, 20)}...`, 'success');
+  } else {
+    sendStatus(`${prefix}Description Layer`, !descLayer ? 'data:description not found' : !metadata.description ? 'No data' : 'Wrong type', 'error');
+  }
+
+  const sourceLayer = findLayerByName(node, 'data:sourceURL');
+  if (sourceLayer && sourceLayer.type === 'TEXT' && metadata.hostname) {
+    await figma.loadFontAsync(sourceLayer.fontName as FontName);
+    sourceLayer.characters = metadata.hostname;
+    sendStatus(`${prefix}Source URL Layer`, `Set: ${metadata.hostname}`, 'success');
+  } else {
+    sendStatus(`${prefix}Source URL Layer`, !sourceLayer ? 'data:sourceURL not found' : !metadata.hostname ? 'No data' : 'Wrong type', 'error');
+  }
+
+  // Handle images - check for both cover and screenshot layers
+  const coverLayer = findLayerByName(node, 'data:cover');
+  const screenshotLayer = findLayerByName(node, 'data:screenshot');
+  
+  // Handle cover layer (og:image or fallback screenshot)
+  if (coverLayer && ('fills' in coverLayer) && metadataData.coverImage) {
+    try {
+      const coverBytes = base64ToUint8Array(metadataData.coverImage.split('base64,')[1]);
+      const coverHash = figma.createImage(coverBytes).hash;
+      coverLayer.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash: coverHash }];
+      sendStatus(`${prefix}Cover Layer`, 'Image applied', 'success');
+    } catch (error) {
+      sendStatus(`${prefix}Cover Layer`, `Error: ${error}`, 'error');
+    }
+  } else if (coverLayer) {
+    sendStatus(`${prefix}Cover Layer`, !('fills' in coverLayer) ? 'No fills' : 'No image data', 'error');
+  }
+  
+  // Handle screenshot layer (always gets screenshot)
+  if (screenshotLayer && ('fills' in screenshotLayer) && metadataData.screenshotImage) {
+    try {
+      const screenshotBytes = base64ToUint8Array(metadataData.screenshotImage.split('base64,')[1]);
+      const screenshotHash = figma.createImage(screenshotBytes).hash;
+      screenshotLayer.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash: screenshotHash }];
+      sendStatus(`${prefix}Screenshot Layer`, 'Screenshot applied', 'success');
+    } catch (error) {
+      sendStatus(`${prefix}Screenshot Layer`, `Error: ${error}`, 'error');
+    }
+  } else if (screenshotLayer) {
+    sendStatus(`${prefix}Screenshot Layer`, !('fills' in screenshotLayer) ? 'No fills' : 'No screenshot data', 'error');
+  }
+
+  const faviconLayer = findLayerByName(node, 'data:favicon');
+  if (faviconLayer && ('fills' in faviconLayer) && metadataData.faviconImage) {
+    try {
+      const faviconBytes = base64ToUint8Array(metadataData.faviconImage.split('base64,')[1]);
+      const faviconHash = figma.createImage(faviconBytes).hash;
+      faviconLayer.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash: faviconHash }];
+      sendStatus(`${prefix}Favicon Layer`, 'Image applied', 'success');
+    } catch (error) {
+      sendStatus(`${prefix}Favicon Layer`, `Error: ${error}`, 'error');
+    }
+  } else {
+    const reason = !faviconLayer ? 'data:favicon not found' : 
+                  !('fills' in faviconLayer) ? 'No fills' : 
+                  'No favicon data';
+    sendStatus(`${prefix}Favicon Layer`, reason, 'error');
+  }
+};
+
+const fillEmptyFrameWithScreenshot = async (node: SceneNode, url: string, openBrowser: boolean, prefix: string) => {
   try {
     sendStatus(`${prefix}Screenshot`, 'Requesting screenshot...', 'pending');
     
-    // Use the existing /capture endpoint for simple screenshot
-    const response = await fetch(`http://localhost:3000/capture`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        url,
-        width: 'width' in node ? node.width : 1200,
-        height: 'height' in node ? node.height : 800
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Screenshot failed: ${response.status}`);
-    }
-
-    const data = await response.json();
-    if (data.success && data.imageUrl) {
-      // Apply screenshot as fill to the frame
-      const imageBytes = base64ToUint8Array(data.imageUrl.split('base64,')[1]);
-      const imageHash = figma.createImage(imageBytes).hash;
+    if (openBrowser) {
+      // Start interactive session
+      const initResponse = await fetch(`http://localhost:3000/interactive-capture`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          url,
+          width: 'width' in node ? node.width : 1200,
+          height: 'height' in node ? node.height : 800
+        }),
+      });
       
-      if ('fills' in node) {
-        node.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash }];
-        sendStatus(`${prefix}Screenshot`, 'Applied to frame', 'success', 'update');
-      } else {
-        sendStatus(`${prefix}Screenshot`, 'Frame cannot have fills', 'error', 'update');
+      if (!initResponse.ok) {
+        throw new Error(`Interactive capture failed: ${initResponse.status}`);
       }
+      
+      const initData = await initResponse.json();
+      if (!initData.success) {
+        throw new Error('Interactive capture initialization failed');
+      }
+      
+      const sessionId = initData.sessionId;
+      activeInteractiveSessions.push(sessionId);
+      
+      // Show interactive controls to user
+      sendStatus(`${prefix}Interactive Mode`, 'Browser opened - complete your actions', 'pending');
+      figma.ui.postMessage({ 
+        type: 'interactive-mode', 
+        message: `Browser opened for ${url}. Handle cookie banners and scroll as needed, then click Continue.`,
+        sessionId 
+      });
+      
+      // Wait for user to continue (with timeout)
+      return new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          activeInteractiveSessions = activeInteractiveSessions.filter(id => id !== sessionId);
+          figma.ui.off('message', continueHandler);
+          sendStatus(`${prefix}Interactive Mode`, 'Timeout - session expired', 'error', 'update');
+          reject(new Error('Interactive session timeout'));
+        }, 10 * 60 * 1000); // 10 minute timeout
+        
+        const continueHandler = async (msg: any) => {
+          if (msg.type === 'continue' && activeInteractiveSessions.includes(sessionId)) {
+            clearTimeout(timeoutId);
+            // Remove the session from active sessions
+            activeInteractiveSessions = activeInteractiveSessions.filter(id => id !== sessionId);
+            
+            try {
+              sendStatus(`${prefix}Interactive Mode`, 'Taking screenshot...', 'pending', 'update');
+              
+              const continueResponse = await fetch(`http://localhost:3000/continue-capture`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sessionId }),
+              });
+              
+              if (!continueResponse.ok) {
+                throw new Error(`Continue capture failed: ${continueResponse.status}`);
+              }
+              
+              const continueData = await continueResponse.json();
+              if (continueData.success && continueData.imageUrl) {
+                const imageBytes = base64ToUint8Array(continueData.imageUrl.split('base64,')[1]);
+                const imageHash = figma.createImage(imageBytes).hash;
+                
+                if ('fills' in node) {
+                  node.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash }];
+                  sendStatus(`${prefix}Interactive Mode`, 'Screenshot applied to frame', 'success', 'update');
+                } else {
+                  sendStatus(`${prefix}Interactive Mode`, 'Frame cannot have fills', 'error', 'update');
+                }
+                
+                // Remove the message handler
+                figma.ui.off('message', continueHandler);
+                resolve(undefined);
+              } else {
+                throw new Error('Continue capture response invalid');
+              }
+            } catch (error) {
+              sendStatus(`${prefix}Interactive Mode`, `Error: ${error instanceof Error ? error.message : String(error)}`, 'error', 'update');
+              figma.ui.off('message', continueHandler);
+              reject(error);
+            }
+          }
+        };
+        
+        figma.ui.on('message', continueHandler);
+      });
     } else {
-      throw new Error('Screenshot response invalid');
+      // Regular non-interactive capture
+      const response = await fetch(`http://localhost:3000/capture`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          url,
+          width: 'width' in node ? node.width : 1200,
+          height: 'height' in node ? node.height : 800
+        }),
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Screenshot failed: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      if (data.success && data.imageUrl) {
+        const imageBytes = base64ToUint8Array(data.imageUrl.split('base64,')[1]);
+        const imageHash = figma.createImage(imageBytes).hash;
+        
+        if ('fills' in node) {
+          node.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash }];
+          sendStatus(`${prefix}Screenshot`, 'Applied to frame', 'success', 'update');
+        } else {
+          sendStatus(`${prefix}Screenshot`, 'Frame cannot have fills', 'error', 'update');
+        }
+      } else {
+        throw new Error('Screenshot response invalid');
+      }
     }
+
   } catch (error) {
     sendStatus(`${prefix}Screenshot`, `Error: ${error instanceof Error ? error.message : String(error)}`, 'error', 'update');
   }
@@ -90,14 +278,14 @@ const processNode = async (node: SceneNode, index: number, total: number) => {
     return;
   }
 
-  const url = node.name;
-  sendStatus(`${prefix}URL Found`, url, 'success');
+  const { url, openBrowser } = parseUrl(node.name);
+  sendStatus(`${prefix}URL Found`, url + (openBrowser ? ' (Interactive Mode)' : ''), 'success');
 
   // Check if this is an empty frame (special case for direct screenshot)
   const isEmptyFrame = 'children' in node && node.children.length === 0;
   if (isEmptyFrame) {
     sendStatus(`${prefix}Empty Frame`, 'Detected - will fill with screenshot', 'success');
-    await fillEmptyFrameWithScreenshot(node, url, prefix);
+    await fillEmptyFrameWithScreenshot(node, url, openBrowser, prefix);
     return;
   }
 
@@ -107,107 +295,117 @@ const processNode = async (node: SceneNode, index: number, total: number) => {
     // Check if screenshot layer exists to request screenshot
     const needsScreenshot = !!findLayerByName(node, 'data:screenshot');
     
-    const metadataResponse = await fetch(`http://localhost:3000/metadata`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        url,
-        width: 'width' in node ? node.width : 800,
-        height: 'height' in node ? node.height : 600,
-        needsScreenshot
-      }),
-    });
-
-    if (!metadataResponse.ok) {
-      sendStatus(`${prefix}Fetching Metadata`, `Failed: ${metadataResponse.status}`, 'error', 'update');
-      return;
-    }
-
-    const metadataData = await metadataResponse.json();
-    if (!metadataData.success) {
-      sendStatus(`${prefix}Fetching Metadata`, 'Server error', 'error', 'update');
-      return;
-    }
-
-    sendStatus(`${prefix}Fetching Metadata`, 'Complete', 'success', 'update');
-    const metadata = metadataData.metadata;
-
-    // Update text layers
-    const titleLayer = findLayerByName(node, 'data:title');
-    if (titleLayer && titleLayer.type === 'TEXT' && metadata.title) {
-      await figma.loadFontAsync(titleLayer.fontName as FontName);
-      titleLayer.characters = metadata.title;
-      sendStatus(`${prefix}Title Layer`, `Set: ${metadata.title.substring(0, 20)}...`, 'success');
-    } else {
-      sendStatus(`${prefix}Title Layer`, !titleLayer ? 'data:title not found' : !metadata.title ? 'No data' : 'Wrong type', 'error');
-    }
-
-    const descLayer = findLayerByName(node, 'data:description');
-    if (descLayer && descLayer.type === 'TEXT' && metadata.description) {
-      await figma.loadFontAsync(descLayer.fontName as FontName);
-      descLayer.characters = metadata.description;
-      sendStatus(`${prefix}Description Layer`, `Set: ${metadata.description.substring(0, 20)}...`, 'success');
-    } else {
-      sendStatus(`${prefix}Description Layer`, !descLayer ? 'data:description not found' : !metadata.description ? 'No data' : 'Wrong type', 'error');
-    }
-
-    const sourceLayer = findLayerByName(node, 'data:sourceURL');
-    if (sourceLayer && sourceLayer.type === 'TEXT' && metadata.hostname) {
-      await figma.loadFontAsync(sourceLayer.fontName as FontName);
-      sourceLayer.characters = metadata.hostname;
-      sendStatus(`${prefix}Source URL Layer`, `Set: ${metadata.hostname}`, 'success');
-    } else {
-      sendStatus(`${prefix}Source URL Layer`, !sourceLayer ? 'data:sourceURL not found' : !metadata.hostname ? 'No data' : 'Wrong type', 'error');
-    }
-
-    // Handle images - check for both cover and screenshot layers
-    const coverLayer = findLayerByName(node, 'data:cover');
-    const screenshotLayer = findLayerByName(node, 'data:screenshot');
-    
-    // Handle cover layer (og:image or fallback screenshot)
-    if (coverLayer && ('fills' in coverLayer) && metadataData.coverImage) {
-      try {
-        const coverBytes = base64ToUint8Array(metadataData.coverImage.split('base64,')[1]);
-        const coverHash = figma.createImage(coverBytes).hash;
-        coverLayer.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash: coverHash }];
-        sendStatus(`${prefix}Cover Layer`, 'Image applied', 'success');
-      } catch (error) {
-        sendStatus(`${prefix}Cover Layer`, `Error: ${error}`, 'error');
+    if (openBrowser) {
+      // Start interactive metadata session
+      const initResponse = await fetch(`http://localhost:3000/interactive-metadata`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          url,
+          width: 'width' in node ? node.width : 800,
+          height: 'height' in node ? node.height : 600,
+          needsScreenshot
+        }),
+      });
+      
+      if (!initResponse.ok) {
+        sendStatus(`${prefix}Fetching Metadata`, `Failed: ${initResponse.status}`, 'error', 'update');
+        return;
       }
-    } else if (coverLayer) {
-      sendStatus(`${prefix}Cover Layer`, !('fills' in coverLayer) ? 'No fills' : 'No image data', 'error');
-    }
-    
-    // Handle screenshot layer (always gets screenshot)
-    if (screenshotLayer && ('fills' in screenshotLayer) && metadataData.screenshotImage) {
-      try {
-        const screenshotBytes = base64ToUint8Array(metadataData.screenshotImage.split('base64,')[1]);
-        const screenshotHash = figma.createImage(screenshotBytes).hash;
-        screenshotLayer.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash: screenshotHash }];
-        sendStatus(`${prefix}Screenshot Layer`, 'Screenshot applied', 'success');
-      } catch (error) {
-        sendStatus(`${prefix}Screenshot Layer`, `Error: ${error}`, 'error');
+      
+      const initData = await initResponse.json();
+      if (!initData.success) {
+        sendStatus(`${prefix}Fetching Metadata`, 'Server error', 'error', 'update');
+        return;
       }
-    } else if (screenshotLayer) {
-      sendStatus(`${prefix}Screenshot Layer`, !('fills' in screenshotLayer) ? 'No fills' : 'No screenshot data', 'error');
+      
+      const sessionId = initData.sessionId;
+      activeInteractiveSessions.push(sessionId);
+      
+      // Show interactive controls to user
+      sendStatus(`${prefix}Interactive Mode`, 'Browser opened - complete your actions', 'pending');
+      figma.ui.postMessage({ 
+        type: 'interactive-mode', 
+        message: `Browser opened for ${url}. Handle cookie banners and scroll as needed, then click Continue.`,
+        sessionId 
+      });
+      
+      // Wait for user to continue (with timeout)
+      await new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          activeInteractiveSessions = activeInteractiveSessions.filter(id => id !== sessionId);
+          figma.ui.off('message', continueHandler);
+          sendStatus(`${prefix}Interactive Mode`, 'Timeout - session expired', 'error', 'update');
+          reject(new Error('Interactive session timeout'));
+        }, 10 * 60 * 1000); // 10 minute timeout
+        
+        const continueHandler = async (msg: any) => {
+          if (msg.type === 'continue' && activeInteractiveSessions.includes(sessionId)) {
+            clearTimeout(timeoutId);
+            // Remove the session from active sessions
+            activeInteractiveSessions = activeInteractiveSessions.filter(id => id !== sessionId);
+            
+            try {
+              sendStatus(`${prefix}Interactive Mode`, 'Processing metadata...', 'pending', 'update');
+              
+              const continueResponse = await fetch(`http://localhost:3000/continue-metadata`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sessionId }),
+              });
+              
+              if (!continueResponse.ok) {
+                throw new Error(`Continue metadata failed: ${continueResponse.status}`);
+              }
+              
+              const metadataData = await continueResponse.json();
+              if (!metadataData.success) {
+                throw new Error('Continue metadata response invalid');
+              }
+              
+              // Process the metadata (same as regular flow)
+              await processMetadataResults(node, metadataData, prefix);
+              
+              // Remove the message handler
+              figma.ui.off('message', continueHandler);
+              resolve(undefined);
+            } catch (error) {
+              sendStatus(`${prefix}Interactive Mode`, `Error: ${error instanceof Error ? error.message : String(error)}`, 'error', 'update');
+              figma.ui.off('message', continueHandler);
+              reject(error);
+            }
+          }
+        };
+        
+        figma.ui.on('message', continueHandler);
+      });
+    } else {
+      // Regular non-interactive metadata
+      const metadataResponse = await fetch(`http://localhost:3000/metadata`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          url,
+          width: 'width' in node ? node.width : 800,
+          height: 'height' in node ? node.height : 600,
+          needsScreenshot
+        }),
+      });
+      
+      if (!metadataResponse.ok) {
+        sendStatus(`${prefix}Fetching Metadata`, `Failed: ${metadataResponse.status}`, 'error', 'update');
+        return;
+      }
+      
+      const metadataData = await metadataResponse.json();
+      if (!metadataData.success) {
+        sendStatus(`${prefix}Fetching Metadata`, 'Server error', 'error', 'update');
+        return;
+      }
+      
+      await processMetadataResults(node, metadataData, prefix);
     }
 
-    const faviconLayer = findLayerByName(node, 'data:favicon');
-    if (faviconLayer && ('fills' in faviconLayer) && metadataData.faviconImage) {
-      try {
-        const faviconBytes = base64ToUint8Array(metadataData.faviconImage.split('base64,')[1]);
-        const faviconHash = figma.createImage(faviconBytes).hash;
-        faviconLayer.fills = [{ type: 'IMAGE', scaleMode: 'FILL', imageHash: faviconHash }];
-        sendStatus(`${prefix}Favicon Layer`, 'Image applied', 'success');
-      } catch (error) {
-        sendStatus(`${prefix}Favicon Layer`, `Error: ${error}`, 'error');
-      }
-    } else {
-      const reason = !faviconLayer ? 'data:favicon not found' : 
-                    !('fills' in faviconLayer) ? 'No fills' : 
-                    'No favicon data';
-      sendStatus(`${prefix}Favicon Layer`, reason, 'error');
-    }
 
   } catch (error) {
     sendStatus(`${prefix}Error`, error instanceof Error ? error.message : String(error), 'error');
@@ -229,6 +427,12 @@ const runProcessing = async () => {
     return;
   }
 
+  // Check if any nodes have interactive mode enabled
+  const hasInteractiveNodes = urlNodes.some(node => parseUrl(node.name).openBrowser);
+  if (hasInteractiveNodes) {
+    sendStatus('Interactive Mode', 'Browser(s) will open for manual interaction', 'pending');
+  }
+
   sendStatus('Processing', `${urlNodes.length} item${urlNodes.length > 1 ? 's' : ''} found`, 'success');
 
   // Process each node
@@ -245,7 +449,19 @@ figma.on('run', runProcessing);
 figma.ui.onmessage = async (msg) => {
   if (msg.type === 'run') {
     await runProcessing();
+  } else if (msg.type === 'continue') {
+    // This is handled by the individual promise handlers in the processing functions
+    // No additional action needed here
   }
 };
+
+// Clean up any lingering interactive sessions on plugin close
+figma.on('close', async () => {
+  if (activeInteractiveSessions.length > 0) {
+    console.log('Cleaning up interactive sessions on plugin close');
+    // Note: We can't directly close browser sessions from here, 
+    // but the server has a cleanup interval for expired sessions
+  }
+});
 
 

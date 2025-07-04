@@ -53,6 +53,34 @@
             display: flex;
             gap: 8px;
         }
+        .interactive-controls {
+            margin-bottom: 16px;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            border: 1px solid #e0e0e0;
+            display: none;
+        }
+        .interactive-controls.active {
+            display: block;
+        }
+        .interactive-message {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 8px;
+        }
+        .continue-button {
+            background: #18a0fb;
+            color: white;
+            border: none;
+        }
+        .continue-button:hover {
+            background: #0d8ce8;
+        }
+        .continue-button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
         button {
             padding: 6px 12px;
             border: 1px solid #ccc;
@@ -99,6 +127,29 @@
         function clearStatus() {
             const list = document.getElementById('statusList');
             list.innerHTML = '';
+            hideInteractiveControls();
+        }
+        
+        function showInteractiveControls(message) {
+            const controls = document.getElementById('interactiveControls');
+            const messageEl = document.getElementById('interactiveMessage');
+            const continueBtn = document.getElementById('continueButton');
+            
+            messageEl.textContent = message;
+            controls.classList.add('active');
+            continueBtn.disabled = false;
+        }
+        
+        function hideInteractiveControls() {
+            const controls = document.getElementById('interactiveControls');
+            controls.classList.remove('active');
+        }
+        
+        function continueProcessing() {
+            const continueBtn = document.getElementById('continueButton');
+            continueBtn.disabled = true;
+            hideInteractiveControls();
+            parent.postMessage({ pluginMessage: { type: 'continue' } }, '*');
         }
 
         function runPlugin() {
@@ -114,6 +165,8 @@
                 } else if (data.action === 'update') {
                     updateStatus(data.label, data.value, data.statusType || 'success');
                 }
+            } else if (type === 'interactive-mode') {
+                showInteractiveControls(data.message);
             }
         };
     </script>
@@ -123,6 +176,11 @@
     <div class="controls">
         <button onclick="runPlugin()">Run Plugin</button>
         <button onclick="clearStatus()">Clear Status</button>
+    </div>
+    
+    <div id="interactiveControls" class="interactive-controls">
+        <div id="interactiveMessage" class="interactive-message"></div>
+        <button id="continueButton" class="continue-button" onclick="continueProcessing()">Continue Processing</button>
     </div>
     <ul id="statusList" class="status-list">
         <!-- Status items will be added dynamically -->

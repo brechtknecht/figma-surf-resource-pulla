@@ -6,6 +6,9 @@ import sharp from "sharp"; // Make sure to install sharp via npm
 const app = express();
 const port = process.env.PORT || 3000;
 
+// Store interactive browser sessions
+const interactiveSessions = new Map();
+
 app.use(cors());
 app.use(express.json());
 
@@ -333,6 +336,336 @@ app.post("/metadata", async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 });
+
+// Interactive capture endpoint - opens browser visibly and waits for continue signal
+app.post("/interactive-capture", async (req, res) => {
+  const { url, width, height } = req.body;
+  const sessionId = Date.now().toString();
+
+  const viewportWidth = Math.floor(Number(width));
+  const viewportHeight = Math.floor(Number(height));
+
+  try {
+    console.log(`Starting interactive session ${sessionId} for ${url}`);
+    
+    // Launch browser in non-headless mode
+    const browser = await puppeteer.launch({ 
+      headless: false,
+      defaultViewport: null,
+      args: ['--start-maximized']
+    });
+    
+    const page = await browser.newPage();
+    await page.setViewport({
+      width: viewportWidth,
+      height: viewportHeight,
+      deviceScaleFactor: 2,
+    });
+
+    await page.goto(url, { waitUntil: "networkidle2" });
+    
+    // Store session for later continuation
+    interactiveSessions.set(sessionId, {
+      browser,
+      page,
+      url,
+      width: viewportWidth,
+      height: viewportHeight,
+      timestamp: Date.now()
+    });
+    
+    console.log(`Interactive session ${sessionId} ready - waiting for continue signal`);
+    
+    // Return session ID immediately - don't wait for screenshot
+    res.json({
+      success: true,
+      sessionId,
+      message: "Browser opened - interact manually, then call /continue-capture"
+    });
+    
+  } catch (error) {
+    console.error("Interactive capture error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Continue capture endpoint - takes screenshot and closes browser
+app.post("/continue-capture", async (req, res) => {
+  const { sessionId } = req.body;
+  
+  if (!sessionId || !interactiveSessions.has(sessionId)) {
+    return res.status(400).json({ success: false, message: "Invalid or expired session" });
+  }
+  
+  const session = interactiveSessions.get(sessionId);
+  
+  try {
+    console.log(`Continuing interactive session ${sessionId}`);
+    
+    const buffer = await session.page.screenshot({ fullPage: false, type: "png" });
+    await session.browser.close();
+    
+    // Clean up session
+    interactiveSessions.delete(sessionId);
+    
+    // Process screenshot
+    const optimizedBuffer = await sharp(buffer)
+      .resize(Math.floor(session.width * 1), Math.floor(session.height * 1))
+      .png({ quality: 100 })
+      .toBuffer();
+
+    console.log(`Interactive session ${sessionId} completed successfully`);
+    
+    res.json({
+      success: true,
+      imageUrl: `data:image/png;base64,${optimizedBuffer.toString("base64")}`,
+    });
+    
+  } catch (error) {
+    console.error("Continue capture error:", error);
+    
+    // Clean up session on error
+    try {
+      await session.browser.close();
+    } catch (e) {
+      console.error("Error closing browser:", e);
+    }
+    interactiveSessions.delete(sessionId);
+    
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Interactive metadata endpoint - similar to regular metadata but with interactive browser
+app.post("/interactive-metadata", async (req, res) => {
+  const { url, width, height, needsScreenshot } = req.body;
+  const sessionId = Date.now().toString();
+
+  try {
+    console.log(`Starting interactive metadata session ${sessionId} for ${url}`);
+    
+    // Launch browser in non-headless mode
+    const browser = await puppeteer.launch({ 
+      headless: false,
+      defaultViewport: null,
+      args: ['--start-maximized']
+    });
+    
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: "networkidle2" });
+    
+    // Store session for later continuation
+    interactiveSessions.set(sessionId, {
+      browser,
+      page,
+      url,
+      width: Math.floor(Number(width)),
+      height: Math.floor(Number(height)),
+      needsScreenshot,
+      timestamp: Date.now()
+    });
+    
+    console.log(`Interactive metadata session ${sessionId} ready - waiting for continue signal`);
+    
+    res.json({
+      success: true,
+      sessionId,
+      message: "Browser opened - interact manually, then call /continue-metadata"
+    });
+    
+  } catch (error) {
+    console.error("Interactive metadata error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Continue metadata endpoint - extracts metadata and takes screenshots
+app.post("/continue-metadata", async (req, res) => {
+  const { sessionId } = req.body;
+  
+  if (!sessionId || !interactiveSessions.has(sessionId)) {
+    return res.status(400).json({ success: false, message: "Invalid or expired session" });
+  }
+  
+  const session = interactiveSessions.get(sessionId);
+  
+  try {
+    console.log(`Continuing interactive metadata session ${sessionId}`);
+    
+    // Extract metadata (same logic as regular metadata endpoint)
+    const metadata = await session.page.evaluate(() => {
+      const getMetaContent = (name) => {
+        const meta = document.querySelector(`meta[name="${name}"], meta[property="${name}"]`);
+        return meta ? meta.getAttribute('content') : null;
+      };
+
+      return {
+        title: document.title || getMetaContent('og:title') || getMetaContent('twitter:title'),
+        description: getMetaContent('description') || getMetaContent('og:description') || getMetaContent('twitter:description'),
+        ogImage: (() => {
+          const imageSelectors = ['og:image', 'og:image:url', 'twitter:image', 'twitter:image:src'];
+          for (const selector of imageSelectors) {
+            const image = getMetaContent(selector);
+            if (image) {
+              try {
+                return new URL(image, window.location.href).href;
+              } catch (e) {
+                continue;
+              }
+            }
+          }
+          return null;
+        })(),
+        favicon: (() => {
+          const selectors = ['link[rel="icon"]', 'link[rel="shortcut icon"]', 'link[rel="apple-touch-icon"]'];
+          for (const selector of selectors) {
+            const favicon = document.querySelector(selector);
+            if (favicon && favicon.href) {
+              try {
+                return new URL(favicon.href, window.location.href).href;
+              } catch (e) {
+                continue;
+              }
+            }
+          }
+          try {
+            return new URL('/favicon.ico', window.location.href).href;
+          } catch (e) {
+            return null;
+          }
+        })(),
+        hostname: window.location.hostname
+      };
+    });
+    
+    // Process images (same logic as regular metadata endpoint)
+    let coverImageBase64 = null;
+    let faviconImageBase64 = null;
+    let screenshotImageBase64 = null;
+    
+    // Try to fetch og:image first
+    if (metadata.ogImage) {
+      try {
+        const ogResponse = await fetch(metadata.ogImage, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (compatible; ResourceCardBot/1.0)',
+            'Accept': 'image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Referer': session.url
+          }
+        });
+        
+        if (ogResponse.ok) {
+          const ogBuffer = await ogResponse.arrayBuffer();
+          if (ogBuffer.byteLength > 0) {
+            const optimizedBuffer = await sharp(Buffer.from(ogBuffer))
+              .jpeg({ quality: 85 })
+              .toBuffer();
+            coverImageBase64 = `data:image/jpeg;base64,${optimizedBuffer.toString('base64')}`;
+          }
+        }
+      } catch (e) {
+        console.log('Failed to fetch og:image:', e.message);
+      }
+    }
+    
+    // Fallback screenshot if no og:image
+    if (!coverImageBase64) {
+      await session.page.setViewport({
+        width: 1920,
+        height: 1080,
+        deviceScaleFactor: 1,
+      });
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const buffer = await session.page.screenshot({ fullPage: false, type: "png" });
+      const optimizedBuffer = await sharp(buffer)
+        .jpeg({ quality: 85 })
+        .toBuffer();
+      coverImageBase64 = `data:image/jpeg;base64,${optimizedBuffer.toString('base64')}`;
+    }
+    
+    // Handle screenshot if needed
+    if (session.needsScreenshot) {
+      await session.page.setViewport({
+        width: 1920,
+        height: 1080,
+        deviceScaleFactor: 1,
+      });
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const buffer = await session.page.screenshot({ fullPage: false, type: "png" });
+      const optimizedBuffer = await sharp(buffer)
+        .jpeg({ quality: 85 })
+        .toBuffer();
+      screenshotImageBase64 = `data:image/jpeg;base64,${optimizedBuffer.toString('base64')}`;
+    }
+    
+    // Fetch favicon
+    const faviconUrls = [
+      metadata.favicon,
+      `https://www.google.com/s2/favicons?domain=${metadata.hostname}&sz=64`,
+      `https://icons.duckduckgo.com/ip3/${metadata.hostname}.ico`
+    ].filter(Boolean);
+
+    for (const faviconUrl of faviconUrls) {
+      try {
+        const faviconResponse = await fetch(faviconUrl, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ResourceCardBot/1.0)' }
+        });
+        
+        if (faviconResponse.ok) {
+          const faviconBuffer = await faviconResponse.arrayBuffer();
+          if (faviconBuffer.byteLength > 0) {
+            const optimizedFavicon = await sharp(Buffer.from(faviconBuffer))
+              .resize(64, 64, { fit: 'cover' })
+              .png()
+              .toBuffer();
+            faviconImageBase64 = `data:image/png;base64,${optimizedFavicon.toString('base64')}`;
+            break;
+          }
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+    
+    await session.browser.close();
+    interactiveSessions.delete(sessionId);
+    
+    console.log(`Interactive metadata session ${sessionId} completed successfully`);
+    
+    res.json({
+      success: true,
+      metadata,
+      coverImage: coverImageBase64,
+      faviconImage: faviconImageBase64,
+      screenshotImage: screenshotImageBase64
+    });
+    
+  } catch (error) {
+    console.error("Continue metadata error:", error);
+    
+    // Clean up session on error
+    try {
+      await session.browser.close();
+    } catch (e) {
+      console.error("Error closing browser:", e);
+    }
+    interactiveSessions.delete(sessionId);
+    
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Clean up expired sessions (older than 10 minutes)
+setInterval(() => {
+  const now = Date.now();
+  for (const [sessionId, session] of interactiveSessions.entries()) {
+    if (now - session.timestamp > 10 * 60 * 1000) {
+      console.log(`Cleaning up expired session ${sessionId}`);
+      session.browser.close().catch(console.error);
+      interactiveSessions.delete(sessionId);
+    }
+  }
+}, 60000); // Check every minute
 
 app.listen(port, () => {
   console.log(`Server listening at http://localhost:${port}`);
