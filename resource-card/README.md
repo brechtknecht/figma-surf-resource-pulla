@@ -51,7 +51,7 @@ Frame: "https://example.com" (empty)
 Frame: [Screenshot of example.com as background]
 ```
 
-### 📋 Resource Card Mode
+### 📋 Pull Metadata
 *For detailed, data-rich components*
 
 1. **Create a component** with these exact layer names:
