@@ -62,8 +62,11 @@ Frame: [Screenshot of example.com as background]
    - `data:favicon` - Image layer for site favicon
 
 2. **Name your component** with a URL (e.g., "https://github.com")
-3. **Run the plugin**
-4. **Watch the magic** as everything auto-populates!
+3. **(optional) Use props**
+   - `::openBrowser` - Opens the Chrome instance before taking a screenshot
+   - `::@1x`, `::@1.5x`, `::@2x` - Sets the scale of the screenshot
+5. **Run the plugin**
+6. **Watch the magic** as everything auto-populates!
 
 ```
 Before:
