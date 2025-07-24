@@ -24,7 +24,7 @@ app.post("/capture", async (req, res) => {
     await page.setViewport({
       width: viewportWidth,
       height: viewportHeight,
-      deviceScaleFactor: 2,
+      deviceScaleFactor: 1,
     });
 
     await page.goto(url, { waitUntil: "networkidle2" });
@@ -234,7 +234,7 @@ app.post("/metadata", async (req, res) => {
       await page.setViewport({
         width: screenshotWidth,
         height: screenshotHeight,
-        deviceScaleFactor: 1, // Use 1x scale for better performance and coverage
+        deviceScaleFactor: 1,
       });
 
       // Wait a bit more for page to adjust to new viewport
@@ -297,9 +297,9 @@ app.post("/metadata", async (req, res) => {
     if (needsScreenshot) {
       console.log('=== GENERATING SCREENSHOT FOR data:screenshot LAYER ===');
       
-      // Use standard desktop viewport for screenshots
-      const screenshotWidth = 1920;
-      const screenshotHeight = 1080;
+      // Use provided dimensions from the screenshot layer
+      const screenshotWidth = Math.floor(Number(width)) || 1920;
+      const screenshotHeight = Math.floor(Number(height)) || 1080;
       
       console.log('Setting viewport for screenshot:', screenshotWidth, 'x', screenshotHeight);
       
@@ -359,7 +359,7 @@ app.post("/interactive-capture", async (req, res) => {
     await page.setViewport({
       width: viewportWidth,
       height: viewportHeight,
-      deviceScaleFactor: 2,
+      deviceScaleFactor: 1,
     });
 
     await page.goto(url, { waitUntil: "networkidle2" });
@@ -586,8 +586,8 @@ app.post("/continue-metadata", async (req, res) => {
     // Handle screenshot if needed
     if (session.needsScreenshot) {
       await session.page.setViewport({
-        width: 1920,
-        height: 1080,
+        width: session.width || 1920,
+        height: session.height || 1080,
         deviceScaleFactor: 1,
       });
       await new Promise(resolve => setTimeout(resolve, 2000));

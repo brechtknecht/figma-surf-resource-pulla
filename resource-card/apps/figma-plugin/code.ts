@@ -14,6 +14,17 @@ const findLayerByName = (node: SceneNode, name: string): SceneNode | null => {
   return null;
 };
 
+const findScreenshotLayer = (node: SceneNode): SceneNode | null => {
+  if (node.name.startsWith('data:screenshot')) return node;
+  if ('children' in node) {
+    for (const child of node.children) {
+      const found = findScreenshotLayer(child);
+      if (found) return found;
+    }
+  }
+  return null;
+};
+
 const base64ToUint8Array = (base64: string): Uint8Array => {
   // Simple base64 decoder for Figma environment
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -46,16 +57,55 @@ const sendStatus = (label: string, value: string, statusType: 'pending' | 'succe
   figma.ui.postMessage({ type: 'status', action, label, value, statusType });
 };
 
-const parseUrl = (rawUrl: string): { url: string; openBrowser: boolean } => {
-  if (rawUrl.includes('::openBrowser')) {
-    return {
-      url: rawUrl.replace('::openBrowser', ''),
-      openBrowser: true
-    };
+const parseUrl = (rawUrl: string): { url: string; openBrowser: boolean; scaleFactor: number } => {
+  let cleanUrl = rawUrl;
+  let openBrowser = false;
+  let scaleFactor = 2; // Default to 2x
+  
+  // Check for ::openBrowser parameter
+  if (cleanUrl.includes('::openBrowser')) {
+    openBrowser = true;
+    cleanUrl = cleanUrl.replace('::openBrowser', '');
   }
+  
+  // Check for ::@Nx parameter (e.g., ::@1x, ::@2x, ::@1.5x, etc.)
+  const scaleMatch = cleanUrl.match(/::\@(\d+(?:\.\d+)?)x?/);
+  if (scaleMatch) {
+    const scale = parseFloat(scaleMatch[1]);
+    if (!isNaN(scale) && scale > 0) {
+      scaleFactor = scale;
+    }
+    cleanUrl = cleanUrl.replace(scaleMatch[0], '');
+  }
+  
   return {
-    url: rawUrl,
-    openBrowser: false
+    url: cleanUrl,
+    openBrowser,
+    scaleFactor
+  };
+};
+
+const parseScreenshotProperties = (screenshotLayerName: string): { openBrowser: boolean; scaleFactor: number } => {
+  let openBrowser = false;
+  let scaleFactor = 2; // Default to 2x
+  
+  // Check for ::openBrowser parameter in screenshot layer name
+  if (screenshotLayerName.includes('::openBrowser')) {
+    openBrowser = true;
+  }
+  
+  // Check for ::@Nx parameter in screenshot layer name
+  const scaleMatch = screenshotLayerName.match(/::\@(\d+(?:\.\d+)?)x?/);
+  if (scaleMatch) {
+    const scale = parseFloat(scaleMatch[1]);
+    if (!isNaN(scale) && scale > 0) {
+      scaleFactor = scale;
+    }
+  }
+  
+  return {
+    openBrowser,
+    scaleFactor
   };
 };
 
@@ -93,7 +143,7 @@ const processMetadataResults = async (node: SceneNode, metadataData: any, prefix
 
   // Handle images - check for both cover and screenshot layers
   const coverLayer = findLayerByName(node, 'data:cover');
-  const screenshotLayer = findLayerByName(node, 'data:screenshot');
+  const screenshotLayer = findScreenshotLayer(node);
   
   // Handle cover layer (og:image or fallback screenshot)
   if (coverLayer && ('fills' in coverLayer) && metadataData.coverImage) {
@@ -141,7 +191,7 @@ const processMetadataResults = async (node: SceneNode, metadataData: any, prefix
   }
 };
 
-const fillEmptyFrameWithScreenshot = async (node: SceneNode, url: string, openBrowser: boolean, prefix: string) => {
+const fillEmptyFrameWithScreenshot = async (node: SceneNode, url: string, openBrowser: boolean, scaleFactor: number, prefix: string) => {
   try {
     sendStatus(`${prefix}Screenshot`, 'Requesting screenshot...', 'pending');
     
@@ -152,8 +202,8 @@ const fillEmptyFrameWithScreenshot = async (node: SceneNode, url: string, openBr
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           url,
-          width: 'width' in node ? node.width : 1200,
-          height: 'height' in node ? node.height : 800
+          width: 'width' in node ? Math.floor(node.width * scaleFactor) : Math.floor(1200 * scaleFactor),
+          height: 'height' in node ? Math.floor(node.height * scaleFactor) : Math.floor(800 * scaleFactor)
         }),
       });
       
@@ -240,8 +290,8 @@ const fillEmptyFrameWithScreenshot = async (node: SceneNode, url: string, openBr
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           url,
-          width: 'width' in node ? node.width : 1200,
-          height: 'height' in node ? node.height : 800
+          width: 'width' in node ? Math.floor(node.width * scaleFactor) : Math.floor(1200 * scaleFactor),
+          height: 'height' in node ? Math.floor(node.height * scaleFactor) : Math.floor(800 * scaleFactor)
         }),
       });
       
@@ -278,14 +328,14 @@ const processNode = async (node: SceneNode, index: number, total: number) => {
     return;
   }
 
-  const { url, openBrowser } = parseUrl(node.name);
-  sendStatus(`${prefix}URL Found`, url + (openBrowser ? ' (Interactive Mode)' : ''), 'success');
-
+  let { url, openBrowser, scaleFactor } = parseUrl(node.name);
+  
   // Check if this is an empty frame (special case for direct screenshot)
   const isEmptyFrame = 'children' in node && node.children.length === 0;
   if (isEmptyFrame) {
+    sendStatus(`${prefix}URL Found`, url + (openBrowser ? ' (Interactive Mode)' : '') + (scaleFactor !== 2 ? ` (@${scaleFactor}x)` : ''), 'success');
     sendStatus(`${prefix}Empty Frame`, 'Detected - will fill with screenshot', 'success');
-    await fillEmptyFrameWithScreenshot(node, url, openBrowser, prefix);
+    await fillEmptyFrameWithScreenshot(node, url, openBrowser, scaleFactor, prefix);
     return;
   }
 
@@ -293,7 +343,27 @@ const processNode = async (node: SceneNode, index: number, total: number) => {
     sendStatus(`${prefix}Fetching Metadata`, 'Connecting to server...', 'pending');
     
     // Check if screenshot layer exists to request screenshot
-    const needsScreenshot = !!findLayerByName(node, 'data:screenshot');
+    const screenshotLayer = findScreenshotLayer(node);
+    const needsScreenshot = !!screenshotLayer;
+    
+    // If screenshot layer exists, merge its properties with frame properties
+    // Screenshot layer properties override frame properties
+    if (screenshotLayer) {
+      const screenshotProps = parseScreenshotProperties(screenshotLayer.name);
+      if (screenshotLayer.name.includes('::openBrowser')) {
+        openBrowser = screenshotProps.openBrowser;
+      }
+      if (screenshotLayer.name.includes('::@')) {
+        scaleFactor = screenshotProps.scaleFactor;
+      }
+    }
+    
+    sendStatus(`${prefix}URL Found`, url + (openBrowser ? ' (Interactive Mode)' : '') + (scaleFactor !== 2 ? ` (@${scaleFactor}x)` : ''), 'success');
+    
+    // Calculate dimensions - use screenshot layer dimensions if it exists, otherwise use frame dimensions
+    const dimensionSource = screenshotLayer && 'width' in screenshotLayer ? screenshotLayer : node;
+    const screenshotWidth = 'width' in dimensionSource ? Math.floor(dimensionSource.width * scaleFactor) : Math.floor(800 * scaleFactor);
+    const screenshotHeight = 'height' in dimensionSource ? Math.floor(dimensionSource.height * scaleFactor) : Math.floor(600 * scaleFactor);
     
     if (openBrowser) {
       // Start interactive metadata session
@@ -302,8 +372,8 @@ const processNode = async (node: SceneNode, index: number, total: number) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           url,
-          width: 'width' in node ? node.width : 800,
-          height: 'height' in node ? node.height : 600,
+          width: screenshotWidth,
+          height: screenshotHeight,
           needsScreenshot
         }),
       });
@@ -386,8 +456,8 @@ const processNode = async (node: SceneNode, index: number, total: number) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           url,
-          width: 'width' in node ? node.width : 800,
-          height: 'height' in node ? node.height : 600,
+          width: screenshotWidth,
+          height: screenshotHeight,
           needsScreenshot
         }),
       });
